@@ -1,0 +1,6 @@
+apiVersion: v2
+name: go-microservice-chart
+description: GO demo microservice
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

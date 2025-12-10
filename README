@@ -1,0 +1,211 @@
+📌 Summary
+
+While provisioning an Amazon EKS cluster using Terraform, the cluster itself was created successfully, but the managed node group repeatedly failed with NodeCreationFailure, and kubectl was unable to authenticate to the cluster, returning:
+
+```
+error: You must be logged in to the server (the server has asked for the client to provide credentials)
+```
+
+This prevented debugging node health from inside Kubernetes and stalled progress.
+---
+🎯 Main Symptoms Observed
+1. Node group creation failed repeatedly
+
+Terraform produced errors such as:
+```
+NodeCreationFailure: Unhealthy nodes in the kubernetes cluster
+```
+
+Even though EC2 instances were running and passed health checks.
+
+2. kubectl could not authenticate
+
+Running:
+```
+kubectl get nodes
+```
+
+returned:
+```
+the server has asked for the client to provide credentials
+```
+
+even after:
+```
+aws eks update-kubeconfig
+```
+3. EKS console showed no RBAC mapping for our IAM user
+
+In EKS → Cluster → Access, only two entries existed:
+
+The EKS service role
+
+The node group role
+
+There was no access entry for our IAM user (terraform-user).
+
+This meant the cluster existed, but nobody had permission to talk to it.
+---
+🔍 Root Causes
+Root Cause 1 — Missing EKS access entry (authentication mapping)
+
+EKS no longer uses the old aws-auth ConfigMap for RBAC.
+Instead, it uses Access Entries, managed either manually or via Terraform.
+
+Because enable_cluster_creator_admin_permissions = true was not applied correctly (unsaved file), Terraform did not create:
+
+An aws_eks_access_entry
+
+An aws_eks_access_policy_association
+
+Meaning:
+
+***The IAM user creating the cluster (terraform-user) was not given admin access to Kubernetes.***
+
+This explains the kubectl login error.
+---
+Root Cause 2 — Node groups depend on working authentication & networking
+
+The node group creation process requires:
+
+The aws-node CNI to come up
+
+Nodes to register with the API server
+
+RBAC to be functional
+
+Because the authentication layer was broken, nodes could not join the cluster, which caused:
+```
+NodeCreationFailure: Unhealthy nodes
+```
+
+---
+🧪 Troubleshooting Steps Attempted
+
+Throughout investigation we validated:
+
+**Networking**
+
+Subnets existed
+
+NAT gateway existed
+
+Routes were correct
+
+Public IP on launch was enabled
+
+Load balancer access was set to public = true
+
+Networking turned out not to be the issue.
+
+**AWS CLI & kubeconfig**
+
+Upgraded AWS CLI from v1 → v2
+
+Regenerated kubeconfig using:
+```
+aws eks update-kubeconfig
+```
+
+Verified token via:
+
+aws eks get-token
+
+
+All passed — meaning kubeconfig generation wasn’t the root issue.
+
+**IAM Role Policies**
+
+Checked all relevant IAM permissions.
+IAM was correct — the missing link was EKS access entries.
+---
+✅ The Fix
+
+Once we identified missing RBAC mapping, we corrected the Terraform configuration:
+
+1. Added the correct EKS access entry
+
+Inside the eks module block:
+```
+enable_cluster_creator_admin_permissions = true
+```
+
+This tells the module:
+
+Give full cluster-admin rights to the identity running the Terraform apply.
+
+2. Ensured addons were installed
+
+Without CNI, nodes cannot join the cluster:
+```
+addons = {
+  coredns = { most_recent = true }
+  kube-proxy = { most_recent = true }
+  vpc-cni = { most_recent = true }
+}
+```
+3. Ensured the correct IAM user was running Terraform
+
+By verifying:
+```
+aws sts get-caller-identity
+```
+
+Output matched:
+```
+arn:aws:iam::184397997945:user/terraform-user
+```
+4. Destroyed everything
+
+To avoid partial state side-effects:
+```
+terraform destroy
+```
+5. Re-applied with the corrected configuration
+```
+terraform apply
+```
+---
+🎉 Final Result
+
+Cluster deployed ✔️
+
+Access entries correctly created ✔️
+
+VPC-CNI, CoreDNS, kube-proxy installed ✔️
+
+Node group successfully created ✔️
+
+kubectl authenticated and working ✔️
+
+Nodes joined the cluster:
+```
+kubectl get nodes
+NAME                                           STATUS   ROLES   AGE   VERSION
+ip-10-0-11-217.eu-central-1.compute.internal   Ready    <none>  82s   v1.32.9
+ip-10-0-12-89.eu-central-1.compute.internal    Ready    <none>  72s   v1.32.9
+```
+
+kube-system pods healthy ✔️
+---
+🧠 Key Lesson Learned
+
+EKS cluster creation is not enough — the IAM identities interacting with Kubernetes MUST be explicitly mapped using EKS Access Entries.
+
+Without that, the cluster exists but is unusable.
+
+This mistake is extremely common, especially for people transitioning from older EKS (or EKS tutorials) where aws-auth was created automatically.
+---
+
+***Files notes***
+eso-secrets-policy.json - A custom IAM policy to enable ESO to read from Secret Manager (Curtusy of ChatGPT)
+Implemented with:
+```
+aws iam create-policy \
+  --policy-name eso-week1-go-demo \
+  --policy-document file://eso-secrets-policy.json
+```
+
+---
+***Future Improvements***
+add an ALB Ingress + AWS Load Balancer Controller
