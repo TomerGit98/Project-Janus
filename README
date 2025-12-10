@@ -1,8 +1,33 @@
+# Week 1 – Go Microservice on AWS EKS - AKA Project Janus
+
+## Overview
+Small Go microservice deployed on AWS EKS using:
+- Terraform (VPC + EKS + Node Group)
+- Helm (app chart)
+- AWS ECR (container registry)
+- External Secrets Operator + AWS Secrets Manager
+
+## Quickstart
+
+```bash
+# infra
+cd infra
+terraform init
+terraform apply
+
+# app
+cd ..
+helm upgrade --install go-demo ./go-microservice-chart
+kubectl get pods
+```
+---
+# Encountered Issues:
+## 1. Node Group didn't manage to start (1.5d until fixed)
 📌 Summary
 
 While provisioning an Amazon EKS cluster using Terraform, the cluster itself was created successfully, but the managed node group repeatedly failed with NodeCreationFailure, and kubectl was unable to authenticate to the cluster, returning:
 
-```
+```bash
 error: You must be logged in to the server (the server has asked for the client to provide credentials)
 ```
 
@@ -12,7 +37,7 @@ This prevented debugging node health from inside Kubernetes and stalled progress
 1. Node group creation failed repeatedly
 
 Terraform produced errors such as:
-```
+```bash
 NodeCreationFailure: Unhealthy nodes in the kubernetes cluster
 ```
 
@@ -21,17 +46,17 @@ Even though EC2 instances were running and passed health checks.
 2. kubectl could not authenticate
 
 Running:
-```
+```bash
 kubectl get nodes
 ```
 
 returned:
-```
+```bash
 the server has asked for the client to provide credentials
 ```
 
 even after:
-```
+```bash
 aws eks update-kubeconfig
 ```
 3. EKS console showed no RBAC mapping for our IAM user
@@ -75,7 +100,7 @@ Nodes to register with the API server
 RBAC to be functional
 
 Because the authentication layer was broken, nodes could not join the cluster, which caused:
-```
+```bash
 NodeCreationFailure: Unhealthy nodes
 ```
 
@@ -103,7 +128,7 @@ Networking turned out not to be the issue.
 Upgraded AWS CLI from v1 → v2
 
 Regenerated kubeconfig using:
-```
+```bash
 aws eks update-kubeconfig
 ```
 
@@ -126,7 +151,7 @@ Once we identified missing RBAC mapping, we corrected the Terraform configuratio
 1. Added the correct EKS access entry
 
 Inside the eks module block:
-```
+```hcl
 enable_cluster_creator_admin_permissions = true
 ```
 
@@ -137,7 +162,7 @@ Give full cluster-admin rights to the identity running the Terraform apply.
 2. Ensured addons were installed
 
 Without CNI, nodes cannot join the cluster:
-```
+```bash
 addons = {
   coredns = { most_recent = true }
   kube-proxy = { most_recent = true }
@@ -147,22 +172,22 @@ addons = {
 3. Ensured the correct IAM user was running Terraform
 
 By verifying:
-```
+```bash
 aws sts get-caller-identity
 ```
 
 Output matched:
-```
+```bash
 arn:aws:iam::184397997945:user/terraform-user
 ```
 4. Destroyed everything
 
 To avoid partial state side-effects:
-```
+```bash
 terraform destroy
 ```
 5. Re-applied with the corrected configuration
-```
+```bash
 terraform apply
 ```
 ---
@@ -179,7 +204,7 @@ Node group successfully created ✔️
 kubectl authenticated and working ✔️
 
 Nodes joined the cluster:
-```
+```bash
 kubectl get nodes
 NAME                                           STATUS   ROLES   AGE   VERSION
 ip-10-0-11-217.eu-central-1.compute.internal   Ready    <none>  82s   v1.32.9
@@ -197,10 +222,90 @@ Without that, the cluster exists but is unusable.
 This mistake is extremely common, especially for people transitioning from older EKS (or EKS tutorials) where aws-auth was created automatically.
 ---
 
+# 2. Secret Handeling Issue
+Problem Symptoms
+
+After integrating External Secrets Operator (ESO) with AWS Secrets Manager, the pod still displayed:
+
+```bash
+PLACEHOLDER_SECRET=BoogaBoo
+```
+
+However, the intended secret value in AWS was:
+```bash
+PLACEHOLDER_SECRET=AbraKadabra
+```
+
+Even after deleting the Kubernetes Secret object, restarting the deployment, and confirming the ExternalSecret was syncing correctly, the pod continued to show the old value.
+
+Initial Hypothesis
+
+Helm templates still referenced the old hardcoded value
+→ We removed all hardcoded values (BoogaBoo) from:
+
+secret.yaml (deleted completely)
+
+values.yaml
+
+deployment.yaml
+
+Possible SecretStore misconfiguration
+→ Fixed API version mismatch and namespace mismatch
+→ Ensured SecretStore referenced the correct service account and region.
+
+ESO not syncing
+→ kubectl describe externalsecret showed "secret synced" which meant ESO was working.
+
+But the pod still showed the old value.
+
+❗ Discovery of the Real Issue
+
+A manual check in AWS Secrets Manager revealed:
+
+There were TWO secrets:
+
+Secret name	Value
+week1/go-microservice/placeholder	AbraKadabra
+week1/go-microservice-demo (unexpected)	BoogaBoo
+
+The ExternalSecret was pointing to the wrong secret (week1/go-microservice-demo).
+
+This was the source of truth the pod was receiving — not the new secret.
+
+✅ Final Fix
+
+Deleted the incorrect secret:
+```bash
+aws secretsmanager delete-secret \
+  --secret-id week1/go-microservice-demo \
+  --force-delete-without-recovery
+```
+
+Updated the ExternalSecret to reference:
+
+# week1/go-microservice/placeholder #
+
+
+Applied the corrected manifest:
+```bash
+kubectl apply -f externalsecret.yaml
+kubectl rollout restart deployment go-demo-go-microservice-chart
+```
+
+Verified:
+```bash
+kubectl exec -it $POD -- sh -c 'env | grep PLACEHOLDER_SECRET'
+```
+
+Result:
+```bash
+PLACEHOLDER_SECRET=AbraKadabra
+```
+
 ***Files notes***
 eso-secrets-policy.json - A custom IAM policy to enable ESO to read from Secret Manager (Curtusy of ChatGPT)
 Implemented with:
-```
+```bash
 aws iam create-policy \
   --policy-name eso-week1-go-demo \
   --policy-document file://eso-secrets-policy.json
