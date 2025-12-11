@@ -4,11 +4,19 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 type Item struct {
 	ID   int    `json:"id"`
 	Name string `json:"name"`
+}
+
+type metrics struct {
+	cpuTemp    prometheus.Gauge
+	hdFailures *prometheus.CounterVec
 }
 
 var items = []Item{
@@ -17,6 +25,17 @@ var items = []Item{
 }
 
 func main() {
+	reg := prometheus.NewRegistry()
+
+	// Create new metrics and register them using the custom registry.
+	m := NewMetrics(reg)
+	// Set values for the new created metrics.
+	m.cpuTemp.Set(65.3)
+	m.hdFailures.With(prometheus.Labels{"device": "/dev/sda"}).Inc()
+
+	// Expose metrics and custom registry via an HTTP server
+	// using the HandleFor function. "/metrics" is the usual endpoint for that.
+	http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg}))
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/items", itemsHandler)
 	log.Println("Starting server on :8080")
@@ -46,6 +65,25 @@ func itemsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	helperJSON(w, http.StatusOK, items)
+}
+
+func NewMetrics(reg prometheus.Registerer) *metrics {
+	m := &metrics{
+		cpuTemp: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "cpu_temperature_celsius",
+			Help: "Current temperature of the CPU.",
+		}),
+		hdFailures: prometheus.NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "hd_errors_total",
+				Help: "Number of hard-disk errors.",
+			},
+			[]string{"device"},
+		),
+	}
+	reg.MustRegister(m.cpuTemp)
+	reg.MustRegister(m.hdFailures)
+	return m
 }
 
 func helperJSON(w http.ResponseWriter, status int, data any) {

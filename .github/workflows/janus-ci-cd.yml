@@ -1,0 +1,33 @@
+name: App CI/CD
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+  HELM_RELEASE: ${{ vars.HELM_RELEASE }}
+  HELM_CHART_PATH: ${{ vars.HELM_CHART_PATH }}
+  IMAGE_TAG: ${{ github.sha }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25' # What I used locally
+
+      - name: Run unit tests
+        run: go test ./...

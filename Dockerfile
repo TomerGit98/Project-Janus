@@ -3,6 +3,7 @@ WORKDIR /app
 COPY go.mod ./
 COPY main.go ./
 RUN go mod download
+RUN go mod tidy
 RUN go build -o server
 
 FROM alpine:latest
