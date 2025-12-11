@@ -31,3 +31,37 @@ jobs:
 
       - name: Run unit tests
         run: go test ./...
+  # Build and push Docker image to ECR - only if tests pass
+  build_and_push:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build-image
+        run: |
+          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          echo "IMAGE_URI=$IMAGE_URI"
+
+          # Build Docker image
+          docker build -t "$IMAGE_URI" .
+
+          # Push to ECR
+          docker push "$IMAGE_URI"
+
+          # Expose the value to next jobs
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
